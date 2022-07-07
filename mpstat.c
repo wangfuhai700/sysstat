@@ -649,6 +649,7 @@ unsigned long long get_global_cpu_mpstats(int prev, int curr,
  *		CPU bitmap for offline CPU.
  ***************************************************************************
  */
+
 void write_plain_cpu_stats(int dis, unsigned long long deltot_jiffies, int prev, int curr,
 			   char *prev_string, char *curr_string, unsigned char offline_cpu_bitmap[])
 {
@@ -743,6 +744,174 @@ void write_plain_cpu_stats(int dis, unsigned long long deltot_jiffies, int prev,
 			   ll_sp_value(scp->cpu_idle,
 				       scc->cpu_idle, deltot_jiffies));
 		printf("\n");
+	}
+}
+
+int read_status_cpu(unsigned int cpu)
+{
+	FILE *fp;
+	char line[1024];
+	int freq;
+
+	snprintf(line, sizeof(line), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);	
+
+	if ((fp = fopen(line, "r")) == NULL)
+		return 0;
+
+	while (fgets(line, sizeof(line), fp) != NULL) {
+			/* Read total number of interrupts received since system boot */
+			sscanf(line, "%d", &freq);
+			if (freq > 1200000) {
+				fclose(fp);
+				return 1;	
+			}
+	}
+
+	fclose(fp);
+	return 0;
+}
+static int display_ts = 0;
+void write_plain_cpu_stats_scas(int dis, unsigned long long deltot_jiffies, int prev, int curr,
+			   char *prev_string, char *curr_string, unsigned char offline_cpu_bitmap[])
+{
+	int i,j,k;
+	struct stats_cpu *scc, *scp;
+	struct cpu_topology *cpu_topo_i;
+
+	if (dis) {
+		if (display_ts)
+			printf("\n%-11s ", prev_string);
+		if (DISPLAY_TOPOLOGY(flags)) {
+			printf(" CORE NODE CPUS ");
+		}
+		printf("    %%usr   %%nice    %%sys %%iowait    %%irq   "
+		       "%%soft  %%steal  %%guest  %%gnice   %%idle\n");
+	}
+
+	/*
+	 * Now display CPU statistics (including CPU "all"),
+	 * except for offline CPU or CPU that the user doesn't want to see.
+	 */
+	for (i = 1; i <= cpu_nr / 2; i++) {
+		double usr0 = 0.0, nice0 = 0.0, sys0 = 0.0, iowait0 = 0.0, hirq0 = 0.0, sirq0 = 0.0, steal0 = 0.0, guest0 = 0.0, gnice0 = 0.0,idle0 = 0.0;
+		double usr48 = 0.0, nice48 = 0.0, sys48 = 0.0, iowait48 = 0.0, hirq48 = 0.0, sirq48 = 0.0, steal48 = 0.0, guest48 = 0.0, gnice48 = 0.0, idle48 = 0.0;
+		for (k = 0; k <= 1; k++) {
+			j = i + k * (cpu_nr / 2);
+			/* Check if we want stats about this proc */
+			if (!(*(cpu_bitmap + (j >> 3)) & (1 << (j & 0x07))) ||
+			    offline_cpu_bitmap[j >> 3] & (1 << (j & 0x07)))
+				continue;
+
+			scc = st_cpu[curr] + j;
+			scp = st_cpu[prev] + j;
+
+			if (k == 0 && display_ts)
+				printf("%-11s", curr_string);
+
+			if (j == 0) {
+				/* This is CPU "all" */
+				cprintf_in(IS_STR, " %s", " all", 0);
+
+				if (DISPLAY_TOPOLOGY(flags)) {
+					printf("               ");
+				}
+			} else {
+				//cprintf_in(IS_INT, " %4d", "", j - 1);
+				if (k == 0 && DISPLAY_TOPOLOGY(flags)) {
+					cpu_topo_i = st_cpu_topology + j - 1;
+					cprintf_in(IS_INT, " %4d", "", cpu_topo_i->logical_core_id);
+					//cprintf_in(IS_INT, " %4d", "", cpu_topo_i->phys_package_id);
+					cprintf_in(IS_INT, " %4d", "", cpu2node[j - 1]);
+				}
+
+				/* Recalculate itv for current proc */
+				deltot_jiffies = get_per_cpu_interval(scc, scp);
+
+				if (!deltot_jiffies) {
+					/*
+				 	* If the CPU is tickless then there is no change in CPU values
+				 	* but the sum of values is not zero.
+				 	*/
+					cprintf_pc(NO_UNIT, 10, 7, 2,
+					   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0);
+					printf("\n");
+
+					continue;
+				}
+			}
+
+			if (k == 0) {
+				usr0 = (scc->cpu_user - scc->cpu_guest) < (scp->cpu_user - scp->cpu_guest) ?
+					0.0 : ll_sp_value(scp->cpu_user - scp->cpu_guest,
+					     scc->cpu_user - scc->cpu_guest, deltot_jiffies);
+				
+				nice0 = (scc->cpu_nice - scc->cpu_guest_nice) < (scp->cpu_nice - scp->cpu_guest_nice) ?
+			   		0.0 :
+			   		ll_sp_value(scp->cpu_nice - scp->cpu_guest_nice,
+					scc->cpu_nice - scc->cpu_guest_nice, deltot_jiffies);
+				sys0 = ll_sp_value(scp->cpu_sys,
+						scc->cpu_sys, deltot_jiffies);
+	
+				iowait0 = ll_sp_value(scp->cpu_iowait,
+						scc->cpu_iowait, deltot_jiffies);
+				hirq0 = ll_sp_value(scp->cpu_hardirq,
+						scc->cpu_hardirq, deltot_jiffies);
+				sirq0 = ll_sp_value(scp->cpu_softirq,
+						scc->cpu_softirq, deltot_jiffies);
+				steal0 = ll_sp_value(scp->cpu_steal,
+						scc->cpu_steal, deltot_jiffies);
+				guest0 = ll_sp_value(scp->cpu_guest,
+						scc->cpu_guest, deltot_jiffies);
+				gnice0 = ll_sp_value(scp->cpu_guest_nice,
+						scc->cpu_guest_nice, deltot_jiffies);
+				idle0 = (scc->cpu_idle < scp->cpu_idle) ?
+					0.0 : ll_sp_value(scp->cpu_idle,
+						scc->cpu_idle, deltot_jiffies);
+			} else {
+				usr48 = (scc->cpu_user - scc->cpu_guest) < (scp->cpu_user - scp->cpu_guest) ?
+					0.0 : ll_sp_value(scp->cpu_user - scp->cpu_guest,
+					scc->cpu_user - scc->cpu_guest, deltot_jiffies);
+				
+				nice48 = (scc->cpu_nice - scc->cpu_guest_nice) < (scp->cpu_nice - scp->cpu_guest_nice) ?
+			   		0.0 :
+			   	ll_sp_value(scp->cpu_nice - scp->cpu_guest_nice,
+					scc->cpu_nice - scc->cpu_guest_nice, deltot_jiffies);
+					sys48 = ll_sp_value(scp->cpu_sys,
+					scc->cpu_sys, deltot_jiffies);
+	
+			   	iowait48 = ll_sp_value(scp->cpu_iowait,
+				       scc->cpu_iowait, deltot_jiffies);
+			   	hirq48 = ll_sp_value(scp->cpu_hardirq,
+				       scc->cpu_hardirq, deltot_jiffies);
+			  	sirq48 = ll_sp_value(scp->cpu_softirq,
+				       scc->cpu_softirq, deltot_jiffies);
+			   	steal48 = ll_sp_value(scp->cpu_steal,
+				       scc->cpu_steal, deltot_jiffies);
+			   	guest48 = ll_sp_value(scp->cpu_guest,
+				       scc->cpu_guest, deltot_jiffies);
+				gnice48 = ll_sp_value(scp->cpu_guest_nice,
+				       scc->cpu_guest_nice, deltot_jiffies);
+				idle48 = (scc->cpu_idle < scp->cpu_idle) ?
+			   		0.0 :
+			  		ll_sp_value(scp->cpu_idle,
+					scc->cpu_idle, deltot_jiffies);
+				cprintf_in(IS_INT, " %2d,","", i);
+				cprintf_in(IS_INT, "%d ", "", i+48);
+				cprintf_pc(NO_UNIT, 10, 7, 2,
+				       (usr48+usr0)/2,
+				       (nice48+nice0)/2,
+				       (sys48+sys0)/2,
+				       (iowait48+iowait0)/2,
+				       (hirq48+hirq0)/2,
+				       (sirq48+sirq0)/2,
+				       (steal48+steal0)/2,
+				       (guest48+guest0)/2,
+				       (gnice48+gnice0)/2,
+				       (idle48+idle0)/2);
+				printf("%s\n", read_status_cpu(j-1) ? " active":" deactive");
+				usr48 = 0.0;nice48 = 0.0;sys48 = 0.0;iowait48 = 0.0; hirq48 = 0.0; sirq48 = 0.0; steal48 = 0.0; guest48 = 0.0; gnice48 = 0.0; idle48  = 0.0;
+			}
+		}
 	}
 }
 
@@ -907,6 +1076,10 @@ void write_cpu_stats(int dis, unsigned long long deltot_jiffies, int prev, int c
 		*next = TRUE;
 		write_json_cpu_stats(tab, deltot_jiffies, prev, curr,
 				     offline_cpu_bitmap);
+	}
+	else if (DISPLAY_SCAS(flags)) {
+		write_plain_cpu_stats_scas(dis, deltot_jiffies, prev, curr,
+				      prev_string, curr_string, offline_cpu_bitmap);
 	}
 	else {
 		write_plain_cpu_stats(dis, deltot_jiffies, prev, curr,
@@ -1825,6 +1998,7 @@ void read_stat_total_irq(struct stats_global_irq *st_irq)
 
 	fclose(fp);
 }
+
 /*
  ***************************************************************************
  * Read stats from /proc/interrupts or /proc/softirqs.
@@ -2282,7 +2456,10 @@ int main(int argc, char **argv)
 					/* Display logical topology */
 					flags |= F_TOPOLOGY;
 					break;
-
+				case 'W':
+					/* Display scas infomation */
+					flags |= F_SCAS;
+					break;
 				case 'u':
 					/* Display CPU */
 					actflags |= M_D_CPU;
